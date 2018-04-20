@@ -10,8 +10,9 @@
 
 @implementation UnityToXcodeBridge
 
-@synthesize returnedValue;
-@synthesize messageReceived;
+@synthesize heartRateValueReceivedFromWatch;
+@synthesize stepCountValueReceivedFromWatch;
+@synthesize buttonPressReceivedFromWatch;
 
 //Static reference to the UnityToXcodeBridge class
 static UnityToXcodeBridge * unityToXcode;
@@ -38,8 +39,9 @@ static UnityToXcodeBridge * unityToXcode;
 -(id) init
 {
     //Set initial values
-    returnedValue = @"0";
-    messageReceived = @"None";
+    heartRateValueReceivedFromWatch = @"0";
+    stepCountValueReceivedFromWatch = @"0";
+    buttonPressReceivedFromWatch = @"None";
     
     //Check if healthData is available
     if([HKHealthStore isHealthDataAvailable])
@@ -61,6 +63,23 @@ static UnityToXcodeBridge * unityToXcode;
             if(!success){
                 NSLog(@"%@", error);
             }
+            else //if no errors occur then ask for permission to use the pedometer
+            {
+                if(!self.pedometer)
+                {
+                    //Initialize the pedometer
+                    self.pedometer = [[CMPedometer  alloc] init];
+                    //Query for the pedometer data, this forces the Motion & Fitness permission request to popup
+                    [self.pedometer queryPedometerDataFromDate:[NSDate date] toDate:[NSDate date] withHandler:
+                     ^(CMPedometerData* data, NSError *error)
+                    {
+                        if(error != nil)
+                        {
+                            NSLog(@"Error: %@",error.localizedFailureReason);
+                        }
+                    }];
+                }
+            }
         }];
 
     }
@@ -79,19 +98,26 @@ static UnityToXcodeBridge * unityToXcode;
 - (void)session:(WCSession *)session didReceiveMessage:(NSDictionary<NSString *,id> *)message replyHandler:(void (^)(NSDictionary<NSString *,id> * _Nonnull))replyHandler
 {
     //If the dictionary contains a message with the key below (used when the watch sends a heart rate)
-    if([message objectForKey:@"returnedValueKey"] != nil)
+    if([message objectForKey:@"returnedHeartRateValueKey"] != nil)
     {
-        //Store the received value
-        returnedValue = [message objectForKey:@"returnedValueKey"];
-		NSLog(@"%@", returnedValue);
+        //Set the heart rate received
+        heartRateValueReceivedFromWatch = [message objectForKey:@"returnedHeartRateValueKey"];
+		NSLog(@"%@", heartRateValueReceivedFromWatch);
+    }
+    //else if the dictionary contains a message with the key below (used when the watch sends the step count)
+    else if([message objectForKey:@"returnedStepCountValueKey"] != nil)
+    {
+        //Store the received step count
+        stepCountValueReceivedFromWatch = [message objectForKey:@"returnedStepCountValueKey"];
+        NSLog(@"%@", stepCountValueReceivedFromWatch);
     }
     //else if the dictionary contains a message with the key below
 	//This will happen when a button is pressed on the watch
     else if([message objectForKey:@"ButtonPressed"] != nil)
     {
-        //Store the received message
-        messageReceived = [message objectForKey:@"ButtonPressed"];
-        NSLog(@"%@", messageReceived);
+        //Store the received button press
+        buttonPressReceivedFromWatch = [message objectForKey:@"ButtonPressed"];
+        NSLog(@"%@", buttonPressReceivedFromWatch);
     }
 }
 
@@ -100,8 +126,8 @@ static UnityToXcodeBridge * unityToXcode;
 /// </summary>
 - (void)startHeartRate
 {
-    //Reset the returnedValue
-    returnedValue = 0;
+    //Reset the heartRateValueReceivedFromWatch
+    heartRateValueReceivedFromWatch = 0;
     
     //Send the StartHeartRate message to the watch
     [[UnityToXcodeBridge instance] sendCharToWatch:"StartHeartRate" WithKey:@"Message"];
@@ -114,6 +140,27 @@ static UnityToXcodeBridge * unityToXcode;
 {
     //Send the StopHeartRate message to the watch
     [[UnityToXcodeBridge instance] sendCharToWatch:"StopHeartRate" WithKey:@"Message"];
+}
+
+/// <summary>
+/// Sends a message to the watch to activate the pedometer reading
+/// </summary>
+- (void)startPedometer
+{
+    //Reset the stepCountValueReceivedFromWatch
+    stepCountValueReceivedFromWatch = 0;
+    
+    //Send the StartPedometer message to the watch
+    [[UnityToXcodeBridge instance] sendCharToWatch:"StartPedometer" WithKey:@"Message"];
+}
+
+/// <summary>
+/// Sends a message to the watch to stop the pedometer reading.
+/// </summary>
+- (void)stopPedometer
+{
+    //Send the StopPedometer message to the watch
+    [[UnityToXcodeBridge instance] sendCharToWatch:"StopPedometer" WithKey:@"Message"];
 }
 
 /// <summary>
@@ -144,17 +191,17 @@ static UnityToXcodeBridge * unityToXcode;
     int pieces = 4;
     
     //Break up the data into small enough sizes to send to the watch
-    NSData *data = [dataToSend subdataWithRange:NSMakeRange(0, dataToSend.length/pieces)];
+    NSData *chunkOfImageData = [dataToSend subdataWithRange:NSMakeRange(0, dataToSend.length/pieces)];
     
-	//Add the data to the NSMutableData (this way we can add bytes to the end of it)
-    NSMutableData *dat = [NSMutableData dataWithBytes:data.bytes length:data.length];
+	//Add the data to mutableData (this way we can add bytes to the end of it)
+    NSMutableData *mutableData = [NSMutableData dataWithBytes:chunkOfImageData.bytes length:chunkOfImageData.length];
     
     for(int i = 0; i<pieces; i++)
     {
-		//Set the data for this piece
-        data = [dataToSend subdataWithRange:NSMakeRange((i * dataToSend.length) / pieces, dataToSend.length / pieces)];
-		//Set NSMutableData to the data of this piece
-        dat = [NSMutableData dataWithBytes:data.bytes length:data.length];
+		//Set the data for this chunk
+        chunkOfImageData = [dataToSend subdataWithRange:NSMakeRange((i * dataToSend.length) / pieces, dataToSend.length / pieces)];
+		//Set mutableData to this chunk of data
+        mutableData = [NSMutableData dataWithBytes:chunkOfImageData.bytes length:chunkOfImageData.length];
 		//Create an array of 4 bytes all set to zero
 		//These bytes will be extracted from the received data on the watch to determine
 		//if the packet of data the watch receives is the last packet for the image or not
@@ -168,14 +215,14 @@ static UnityToXcodeBridge * unityToXcode;
             bytes[3] = 1;
         }
         
-		//Add the bytes onto the end of the data
-        [dat appendBytes:bytes length:sizeof(bytes)];
+		//Add the bytes onto the end of the mutableData
+        [mutableData appendBytes:bytes length:sizeof(bytes)];
     
 		//If the watch is reachable
         if([[WCSession defaultSession] isReachable])
         {
 			//Send the data to the watch
-            [[WCSession defaultSession] sendMessageData:[NSData dataWithData:dat]//Create an NSData object out of the NSMutableData object
+            [[WCSession defaultSession] sendMessageData:[NSData dataWithData:mutableData]//Create an NSData object out of the NSMutableData object
                                            replyHandler:^(NSData *reply){
                                                NSLog(@"Successful");
                                            }
@@ -199,17 +246,25 @@ static UnityToXcodeBridge * unityToXcode;
 extern "C"
 {
     /// <summary>
-    /// Returns the double value stored in returnedValue.
+    /// Returns the stored Heart Rate.
     /// </summary>
-    double GetDoubleValueFromWatch()
+    double GetHeartRateFromWatch()
     {
-        NSString *stringReturnedValue = [UnityToXcodeBridge instance].returnedValue;
-        double numRepresentationOfReturnedValue = [stringReturnedValue doubleValue];
-        return numRepresentationOfReturnedValue;
+        double numRepresentationOfHeartRate = [[UnityToXcodeBridge instance].heartRateValueReceivedFromWatch doubleValue];
+        return numRepresentationOfHeartRate;
     }
     
     /// <summary>
-    /// Starts Recording Heart Rate on the watch.
+    /// Returns the stored Step Count.
+    /// </summary>
+    double GetStepCountFromWatch()
+    {
+        double numRepresentationOfStepCount = [[UnityToXcodeBridge instance].stepCountValueReceivedFromWatch doubleValue];
+        return numRepresentationOfStepCount;
+    }
+    
+    /// <summary>
+    /// Starts recording Heart Rate on the watch.
     /// </summary>
     void StartRecordingHeartRate()
     {
@@ -217,7 +272,7 @@ extern "C"
     }
     
     /// <summary>
-    /// Stops Recording Heart Rate on the watch.
+    /// Stops recording Heart Rate on the watch.
     /// </summary>
     void StopRecordingHeartRate()
     {
@@ -225,8 +280,24 @@ extern "C"
     }
     
     /// <summary>
+    /// Starts streaming the pedometer from the watch.
+    /// </summary>
+    void StartStreamingPedometer()
+    {
+        [[UnityToXcodeBridge instance] startPedometer];
+    }
+    
+    /// <summary>
+    /// Stops streaming the pedometer on the watch.
+    /// </summary>
+    void StopStreamingPedometer()
+    {
+        [[UnityToXcodeBridge instance] stopPedometer];
+    }
+    
+    /// <summary>
     /// Send const char* "inputMessage" to the watch.
-    /// Intended to be used as way for communicating button presses to the watch
+    /// Intended to be used as way for communicating button presses on the phone to the watch
     /// </summary>
     /// <param name="inputMessage">const char* message sent to the watch.</param>
     void SendInputToXcode(const char* inputMessage)
@@ -247,14 +318,14 @@ extern "C"
 
     
     /// <summary>
-    /// Returns "messageReceived" if it isn't nil.
-	/// Essentially sends any messages to the phone that were received from the watch
+    /// Returns "buttonPressReceivedFromWatch" if it isn't nil.
+	/// Sends button press to the phone that were received from the watch
     /// </summary>
-    const char* GetMessageFromWatch()
+    const char* GetButtonPressFromWatch()
     {
-        if([UnityToXcodeBridge instance].messageReceived != nil)
+        if([UnityToXcodeBridge instance].buttonPressReceivedFromWatch != nil)
         {
-            const char *constCharToSendToPhone = strdup([[UnityToXcodeBridge instance].messageReceived UTF8String]);
+            const char *constCharToSendToPhone = strdup([[UnityToXcodeBridge instance].buttonPressReceivedFromWatch UTF8String]);
             NSLog(@"%s", constCharToSendToPhone);
             return constCharToSendToPhone;
         }
